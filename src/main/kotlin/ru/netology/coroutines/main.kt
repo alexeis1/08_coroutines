@@ -5,10 +5,9 @@ import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
 import okhttp3.*
 import okhttp3.logging.HttpLoggingInterceptor
-import ru.netology.coroutines.dto.Comment
-import ru.netology.coroutines.dto.Post
-import ru.netology.coroutines.dto.PostWithComments
+import ru.netology.coroutines.dto.*
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.EmptyCoroutineContext
 import kotlin.coroutines.resume
@@ -135,10 +134,19 @@ fun main() {
     with(CoroutineScope(EmptyCoroutineContext)) {
         launch {
             try {
+                //кеш авторов, чтоб не делать лишних заопросов
+                val authorCache = ConcurrentHashMap<Long,Author>()
                 val posts = getPosts(client)
                     .map { post ->
                         async {
-                            PostWithComments(post, getComments(client, post.id))
+                            PostWithComments(
+                                post     = post,
+                                author   = getAuthor(authorCache, post.authorId),
+                                //передаем функцию получения авторов в getComments
+                                comments = getComments(client, post.id){
+                                    getAuthor(authorCache, it)
+                                }
+                            )
                         }
                     }.awaitAll()
                 println(posts)
@@ -149,6 +157,16 @@ fun main() {
     }
     Thread.sleep(30_000L)
 }
+
+//запрашивает автора или с сервера или из кеша
+suspend fun getAuthor(authorCache : ConcurrentHashMap<Long,Author>, authorId : Long ) : Author =
+    if (!authorCache.containsKey(authorId)) {
+        val postAuthor = getAuthor(client, authorId)
+        authorCache[authorId] = postAuthor
+        postAuthor
+    } else {
+        authorCache[authorId] ?: Author(0,"","")
+    }
 
 suspend fun OkHttpClient.apiCall(url: String): Response {
     return suspendCoroutine { continuation ->
@@ -181,8 +199,14 @@ suspend fun <T> makeRequest(url: String, client: OkHttpClient, typeToken: TypeTo
             }
     }
 
+suspend fun getAuthor(client: OkHttpClient, id: Long): Author =
+    makeRequest("$BASE_URL/api/authors/$id", client, object : TypeToken<Author>() {})
+
 suspend fun getPosts(client: OkHttpClient): List<Post> =
     makeRequest("$BASE_URL/api/slow/posts", client, object : TypeToken<List<Post>>() {})
 
-suspend fun getComments(client: OkHttpClient, id: Long): List<Comment> =
-    makeRequest("$BASE_URL/api/slow/posts/$id/comments", client, object : TypeToken<List<Comment>>() {})
+suspend fun getComments(client: OkHttpClient, id: Long, block: suspend (authorId: Long) -> Author): List<CommentWithAuthor> {
+    val comments = makeRequest("$BASE_URL/api/slow/posts/$id/comments", client, object : TypeToken<List<Comment>>() {})
+    return comments.map { CommentWithAuthor(it, block(it.authorId)) }
+}
+
